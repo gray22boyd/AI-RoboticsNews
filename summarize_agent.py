@@ -61,6 +61,11 @@ class IntelligentSummarizeAgent:
                 'keywords': ['robotics', 'automation', 'industrial', 'manufacturing', 'ros'],
                 'display_name': '🏭 Robotics & Automation',
                 'icon': '🏭'
+            },
+            'general_ai': {
+                'keywords': ['artificial intelligence', 'machine learning', 'neural network', 'deep learning'],
+                'display_name': '📊 General AI Research',
+                'icon': '📊'
             }
         }
         
@@ -73,6 +78,37 @@ class IntelligentSummarizeAgent:
             'funding': ['funding', 'investment', 'series', 'valuation', 'acquisition'],
             'open_source': ['open source', 'github', 'repository', 'community', 'free']
         }
+    
+    def _make_gpt_request(self, prompt: str, max_tokens: int = 300, temperature: float = 0.3) -> str:
+        """Make GPT request with proper error handling and truncation detection"""
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+            
+            content = response.choices[0].message.content.strip()
+            finish_reason = response.choices[0].finish_reason
+            
+            # Check if response was truncated
+            if finish_reason == "length":
+                logger.warning("GPT response was truncated, retrying with higher token limit")
+                # Retry with more tokens
+                response = self.client.chat.completions.create(
+                    model="gpt-4",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens * 2,
+                    temperature=temperature
+                )
+                content = response.choices[0].message.content.strip()
+                
+            return content
+            
+        except Exception as e:
+            logger.error(f"GPT request failed: {e}")
+            return "Analysis temporarily unavailable due to processing error."
     
     def cluster_items_by_topic(self, items: List[Dict[str, Any]], text_fields: List[str]) -> Dict[str, List[Dict]]:
         """Cluster items by topic based on content analysis"""
@@ -104,7 +140,7 @@ class IntelligentSummarizeAgent:
         if unclustered:
             high_relevance = [item for item in unclustered if item.get('relevance_score', 0) > 3.0]
             if high_relevance:
-                clusters['other'] = high_relevance
+                clusters['general_ai'] = high_relevance
         
         return dict(clusters)
     
@@ -138,7 +174,7 @@ class IntelligentSummarizeAgent:
             analysis_results = {}
             
             for cluster_id, cluster_commits in clustered_commits.items():
-                if len(cluster_commits) < 2:  # Skip clusters with too few items
+                if len(cluster_commits) < 1:  # Allow single commits for analysis
                     continue
                 
                 cluster_info = self.topic_clusters.get(cluster_id, {
@@ -146,45 +182,47 @@ class IntelligentSummarizeAgent:
                     'icon': '💻'
                 })
                 
-                # Prepare data for GPT analysis
-                commit_data = []
-                repo_summary = defaultdict(list)
-                
-                for commit in cluster_commits[:5]:  # Max 5 commits per cluster
-                    repo = commit.get('repo', 'unknown')
-                    repo_summary[repo].append({
-                        'message': commit.get('message', '')[:100],
-                        'author': commit.get('author', '')
+                # Prepare detailed commit data for analysis
+                commit_details = []
+                for commit in cluster_commits[:8]:  # Analyze up to 8 commits
+                    commit_details.append({
+                        'repo': commit.get('repo', 'unknown'),
+                        'message': commit.get('message', '')[:150],
+                        'author': commit.get('author', ''),
+                        'files_changed': commit.get('files_changed', 0)
                     })
                 
                 prompt = f"""
                 Analyze these GitHub commits for {cluster_info['display_name']}:
                 
-                Repository Activity: {json.dumps(dict(repo_summary), indent=2)}
+                Commits: {json.dumps(commit_details, indent=2)}
                 
-                Create a natural summary without markdown labels:
+                Provide a technical analysis focusing on:
+                1. What specific functionality is being developed/improved
+                2. Key technical changes or architectural decisions
+                3. Impact on users or developers
                 
-                Write 1-2 sentences describing the main development themes, then list 2-3 specific technical changes as short bullets:
-                - Focus on actual changes visible in commit messages
-                - Be technically specific, not generic
-                - If commits are minor/unclear, state "Minor maintenance updates across repositories"
-                - Each bullet point must be 1 line maximum
-                - Group similar changes together
+                Format: Write 2-3 sentences describing the main development themes, then list exactly 2-3 specific changes as bullets:
+                - Each bullet must describe a concrete technical change
+                - Be specific about what was modified/added/fixed
+                - If commits are unclear/minor, focus on the repository areas being worked on
+                - Maximum 1 line per bullet point
                 
-                Do not use **Headline:** or **Key Changes:** labels.
+                Example good format:
+                "PyTorch development focused on improving dynamic execution and XPU support this week. The team made significant updates to the Dynamo tracing system and expanded hardware compatibility.
+                - Added XPU API support to trace_rules for better hardware acceleration
+                - Implemented helper functions for guard filter hooks in dynamic execution
+                - Updated gradient behavior documentation for torch.amin and torch.amax functions"
+                
+                Do not use markdown headers or labels like "**Analysis:**"
                 """
                 
-                response = self.client.chat.completions.create(
-                    model="gpt-4",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=200,
-                    temperature=0.2
-                )
+                analysis = self._make_gpt_request(prompt, max_tokens=250, temperature=0.2)
                 
                 analysis_results[cluster_id] = {
                     'cluster_info': cluster_info,
                     'commit_count': len(cluster_commits),
-                    'analysis': response.choices[0].message.content.strip(),
+                    'analysis': analysis,
                     'raw_commits': cluster_commits[:3]  # Keep top 3 for sources
                 }
             
@@ -200,84 +238,78 @@ class IntelligentSummarizeAgent:
             if not papers:
                 return {'status': 'no_data', 'message': 'No research papers found in monitoring period.'}
             
-            # Filter by relevance score > 6.5 as requested
-            high_relevance_papers = [p for p in papers if p.get('relevance_score', 0) > 6.5]
+            # Filter for high-relevance papers
+            relevant_papers = [p for p in papers if p.get('relevance_score', 0) >= 6.0]
             
-            if not high_relevance_papers:
-                # Check if we have any papers with score > 4.0
-                medium_papers = [p for p in papers if p.get('relevance_score', 0) > 4.0]
-                if not medium_papers:
-                    return {'status': 'no_relevant', 'message': 'No papers meeting relevance threshold found today.'}
-                high_relevance_papers = medium_papers[:3]
+            if not relevant_papers:
+                return {'status': 'no_relevant', 'message': 'No high-relevance papers found.'}
             
             # Cluster papers by topic
             clustered_papers = self.cluster_items_by_topic(
-                high_relevance_papers,
-                ['title', 'abstract', 'query']
+                relevant_papers,
+                ['title', 'abstract', 'keywords']
             )
             
             if not clustered_papers:
-                return {'status': 'no_clusters', 'message': 'No clusterable papers found.'}
+                return {'status': 'no_clusters', 'message': 'Papers could not be meaningfully clustered.'}
             
             analysis_results = {}
             
             for cluster_id, cluster_papers in clustered_papers.items():
+                if len(cluster_papers) < 1:
+                    continue
+                
                 cluster_info = self.topic_clusters.get(cluster_id, {
-                    'display_name': '📊 General AI Research',
-                    'icon': '📊'
+                    'display_name': '📄 Research Papers',
+                    'icon': '📄'
                 })
                 
-                # Take top papers from cluster
-                top_papers = sorted(cluster_papers, key=lambda x: x.get('relevance_score', 0), reverse=True)[:2]
-                
-                papers_data = []
-                for paper in top_papers:
-                    paper_info = {
-                        'title': paper.get('title', 'Unknown Title'),
-                        'abstract': paper.get('abstract', 'No abstract')[:300],
-                        'relevance_score': paper.get('relevance_score', 0),
-                        'tasks': paper.get('tasks', []),
-                        'methods': paper.get('methods', []),
-                        'has_top_org': paper.get('has_top_org', False)
-                    }
-                    papers_data.append(paper_info)
+                # Prepare paper data for analysis
+                paper_data = []
+                for paper in cluster_papers[:6]:  # Max 6 papers per cluster
+                    paper_data.append({
+                        'title': paper.get('title', '')[:100],
+                        'abstract': paper.get('abstract', '')[:300] if paper.get('abstract') else '',
+                        'relevance': paper.get('relevance_score', 0)
+                    })
                 
                 prompt = f"""
                 Analyze these research papers for {cluster_info['display_name']}:
                 
-                Papers: {json.dumps(papers_data, indent=2)}
+                Papers: {json.dumps(paper_data, indent=2)}
                 
-                Create a natural research summary without markdown labels:
+                Provide an insightful analysis focusing on:
+                1. What research problems are being addressed
+                2. Key methodological approaches or innovations
+                3. Potential real-world applications or implications
                 
-                Write 1-2 sentences about the common research direction, then list 2 key findings as short bullets:
-                - Focus on concrete technical contributions and real-world applications
-                - Highlight practical applications and impact
-                - If papers are preliminary/incremental, state honestly
-                - Each finding must be 1-2 sentences maximum
-                - Use format: *Paper Title* — brief contribution summary
+                Format: Write 2-3 sentences describing the research direction and significance, then list exactly 2-3 key papers as bullets:
+                - Each bullet: "Paper Title" — Brief description of contribution/innovation (1 line max)
+                - Focus on what makes each paper significant or novel
+                - Explain potential impact or applications
                 
-                Do not use **Research Theme:** or **Key Findings:** labels.
+                Example good format:
+                "The research focuses on improving autonomous navigation through advanced sensor fusion and AI reasoning. These papers address critical challenges in real-world deployment of autonomous systems.
+                - "OctoNav: Towards Generalist Embodied Navigation" — Develops unified navigation framework bridging different robotic tasks and environmental conditions
+                - "Event-based Camera Navigation with RL" — Combines event cameras with reinforcement learning for real-time obstacle avoidance in dynamic environments"
+                
+                Do not use markdown headers. Be specific about technical contributions.
                 """
                 
-                response = self.client.chat.completions.create(
-                    model="gpt-4",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=250,
-                    temperature=0.3
-                )
+                analysis = self._make_gpt_request(prompt, max_tokens=300, temperature=0.3)
                 
                 analysis_results[cluster_id] = {
                     'cluster_info': cluster_info,
                     'paper_count': len(cluster_papers),
-                    'analysis': response.choices[0].message.content.strip(),
-                    'raw_papers': top_papers
+                    'analysis': analysis,
+                    'raw_papers': cluster_papers[:3]
                 }
             
             return {'status': 'success', 'clusters': analysis_results}
             
         except Exception as e:
             logger.error(f"Error analyzing paper clusters: {e}")
-            return {'status': 'error', 'message': 'Research paper analysis unavailable due to processing error.'}
+            return {'status': 'error', 'message': 'Paper analysis unavailable due to processing error.'}
     
     def analyze_news_clusters(self, articles: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Analyze news with clustering and topic grouping"""
@@ -325,29 +357,31 @@ class IntelligentSummarizeAgent:
                 
                 Articles: {json.dumps(articles_data, indent=2)}
                 
-                Create a natural news summary without markdown labels:
+                Provide industry analysis focusing on:
+                1. What business developments or strategic moves are happening
+                2. Key product launches, partnerships, or announcements
+                3. Market implications or competitive dynamics
                 
-                Write 1-2 sentences capturing the main industry developments, then list 2-3 key announcements as short bullets:
-                - Focus on concrete announcements and business implications
-                - Highlight technical and market significance
-                - Each development must be 1 line maximum
-                - Use format: *Company/Topic* — specific announcement or development
-                - Group by company when multiple stories about same organization
+                Format: Write 2-3 sentences describing the industry developments, then list exactly 2-3 key announcements as bullets:
+                - Each bullet: *Company/Product* — Specific announcement or development (1 line max)
+                - Focus on concrete business actions, not speculation
+                - Highlight what's new or significant about each announcement
                 
-                Do not use **News Theme:** or **Key Developments:** labels.
+                Example good format:
+                "The AI industry continues to evolve with significant developments from major players like Microsoft and NVIDIA. Companies are focusing on enterprise AI tools and autonomous vehicle technologies.
+                - *Microsoft AI* — Introduced Code Researcher, a deep research agent for large systems code and commit history
+                - *NVIDIA* — CEO outlined the blueprint for Europe's AI boom at GTC Paris
+                - *NVIDIA* — Released new AI models and developer tools to advance the autonomous vehicle ecosystem"
+                
+                Do not use markdown headers. Be specific about what each company announced.
                 """
                 
-                response = self.client.chat.completions.create(
-                    model="gpt-4",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=300,
-                    temperature=0.3
-                )
+                analysis = self._make_gpt_request(prompt, max_tokens=250, temperature=0.3)
                 
                 analysis_results[cluster_id] = {
                     'cluster_info': cluster_info,
                     'article_count': len(cluster_articles),
-                    'analysis': response.choices[0].message.content.strip(),
+                    'analysis': analysis,
                     'raw_articles': top_articles
                 }
             
@@ -440,23 +474,16 @@ class IntelligentSummarizeAgent:
             Write 3-4 complete sentences. No bullet points or markdown.
             """
             
-            response = self.client.chat.completions.create(
-                model="gpt-4",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=150,  # Strict limit to prevent cutoffs
-                temperature=0.3
-            )
-            
-            insights = response.choices[0].message.content.strip()
+            strategic_insights = self._make_gpt_request(prompt, max_tokens=200, temperature=0.3)
             
             # Ensure complete sentences
-            if insights and not insights.endswith('.'):
+            if strategic_insights and not strategic_insights.endswith('.'):
                 # Find the last complete sentence
-                last_period = insights.rfind('.')
+                last_period = strategic_insights.rfind('.')
                 if last_period > 0:
-                    insights = insights[:last_period + 1]
+                    strategic_insights = strategic_insights[:last_period + 1]
             
-            return insights
+            return strategic_insights
             
         except Exception as e:
             logger.error(f"Error generating cross-cluster insights: {e}")

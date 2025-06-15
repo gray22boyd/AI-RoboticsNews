@@ -907,9 +907,11 @@ class EnhancedEmailAgent:
             }
             trend_arrow = trend_arrows.get(trend, '➡️')
             
-            # Generate brief insight
+            # Generate actual insight from cluster analysis
             sources = [k for k in ['github', 'papers', 'news'] if cluster_data.get(k)]
-            source_text = ', '.join(sources)
+            
+            # Extract key insight from the actual analysis content
+            insight_text = self._extract_key_insight(cluster_data, sources)
             
             insights_html += f"""
             <div class="insight-card">
@@ -921,7 +923,7 @@ class EnhancedEmailAgent:
                     </div>
                 </div>
                 <div class="insight-summary">
-                    Active in {source_text}. Trend: {trend} activity with {activity_level} priority level.
+                    {insight_text}
                 </div>
             </div>
             """
@@ -932,6 +934,36 @@ class EnhancedEmailAgent:
         """
         
         return insights_html
+    
+    def _extract_key_insight(self, cluster_data: Dict, sources: List[str]) -> str:
+        """Extract a meaningful insight from cluster analysis instead of generic template"""
+        try:
+            # Get the first sentence from the most relevant analysis
+            analyses = []
+            for source in sources:
+                if cluster_data.get(source) and cluster_data[source].get('analysis'):
+                    analysis = cluster_data[source]['analysis']
+                    # Extract first sentence
+                    first_sentence = analysis.split('.')[0].strip()
+                    if first_sentence and len(first_sentence) > 20:
+                        analyses.append(first_sentence + '.')
+            
+            if analyses:
+                # Return the most informative analysis (longest meaningful sentence)
+                best_analysis = max(analyses, key=len)
+                # Truncate if too long for insight card
+                if len(best_analysis) > 120:
+                    best_analysis = best_analysis[:117] + '...'
+                return best_analysis
+            else:
+                # Fallback to source-based description
+                source_text = ', '.join(sources)
+                return f"Active developments across {source_text} with {cluster_data.get('activity_level', 'medium')} priority signals."
+                
+        except Exception as e:
+            logger.warning(f"Error extracting key insight: {e}")
+            source_text = ', '.join(sources) if sources else 'multiple sources'
+            return f"Notable activity in {source_text} requiring attention."
     
     def _build_enhanced_cluster_content(self, all_clusters: Dict) -> str:
         """Build enhanced cluster content with visual hierarchy"""
