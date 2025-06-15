@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Intelligent Summarize Agent
-Creates clustered AI & robotics digest using GPT-4 with topic grouping and relevance filtering
+Advanced Intelligent Summarize Agent
+Creates clustered AI & robotics digest using GPT-4 with full content extraction and context-aware analysis
 """
 
 import logging
@@ -10,15 +10,28 @@ import json
 from collections import defaultdict
 import re
 from datetime import datetime
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
+import concurrent.futures
 from openai import OpenAI
 from config import OPENAI_API_KEY
-from utils import truncate_text, format_date_readable
+from utils import truncate_text, format_date_readable, rate_limit
 
 logger = logging.getLogger(__name__)
 
 class IntelligentSummarizeAgent:
     def __init__(self):
         self.client = OpenAI(api_key=OPENAI_API_KEY)
+        
+        # Setup session for web scraping
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Connection': 'keep-alive',
+        })
         
         # Topic clustering definitions
         self.topic_clusters = {
@@ -79,6 +92,108 @@ class IntelligentSummarizeAgent:
             'open_source': ['open source', 'github', 'repository', 'community', 'free']
         }
     
+    @rate_limit(calls_per_minute=30)  # Be respectful to websites
+    def extract_full_article_content(self, url: str, timeout: int = 10) -> Dict[str, Any]:
+        """Extract full article content from URL using BeautifulSoup"""
+        try:
+            logger.info(f"Extracting content from: {url}")
+            
+            response = self.session.get(url, timeout=timeout)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.content, 'html.parser')
+            
+            # Remove unwanted elements
+            for element in soup(['script', 'style', 'nav', 'header', 'footer', 'aside', 'advertisement', 'iframe']):
+                element.decompose()
+            
+            # Try to find main content area with multiple selectors
+            content_selectors = [
+                'article', '[role="main"]', '.article-content', '.post-content', 
+                '.entry-content', '.content', 'main', '.article-body', '.story-body',
+                '.post-body', '.article-text', '.content-body'
+            ]
+            
+            content_text = ""
+            for selector in content_selectors:
+                content_elem = soup.select_one(selector)
+                if content_elem:
+                    content_text = content_elem.get_text(separator=' ', strip=True)
+                    if len(content_text) > 500:  # Good content found
+                        break
+            
+            # Fallback to body if no specific content area found
+            if not content_text or len(content_text) < 200:
+                content_text = soup.body.get_text(separator=' ', strip=True) if soup.body else ""
+            
+            # Clean up text
+            content_text = re.sub(r'\s+', ' ', content_text)
+            content_text = re.sub(r'Advertisement|Subscribe|Sign up|Newsletter', '', content_text, flags=re.IGNORECASE)
+            
+            # Extract title
+            title = ""
+            if soup.title:
+                title = soup.title.string.strip()
+            elif soup.find('h1'):
+                title = soup.find('h1').get_text(strip=True)
+            
+            # Extract publish date
+            publish_date = ""
+            date_selectors = ['time', '[datetime]', '.date', '.published', '.post-date']
+            for selector in date_selectors:
+                date_elem = soup.select_one(selector)
+                if date_elem:
+                    publish_date = date_elem.get('datetime') or date_elem.get_text(strip=True)
+                    break
+            
+            return {
+                'content': content_text,
+                'title': title,
+                'publish_date': publish_date,
+                'word_count': len(content_text.split()),
+                'extraction_success': len(content_text) > 200,
+                'url': url
+            }
+            
+        except Exception as e:
+            logger.error(f"Error extracting content from {url}: {e}")
+            return {
+                'content': '', 
+                'extraction_success': False, 
+                'error': str(e),
+                'url': url
+            }
+
+    def enrich_articles_with_content(self, articles: List[Dict[str, Any]], max_articles: int = 5) -> List[Dict[str, Any]]:
+        """Extract full content from top articles"""
+        enriched_articles = []
+        
+        # Sort by relevance and take top articles
+        sorted_articles = sorted(articles, key=lambda x: x.get('relevance_score', 0), reverse=True)[:max_articles]
+        
+        for article in sorted_articles:
+            url = article.get('url', '')
+            if not url:
+                continue
+                
+            logger.info(f"Extracting content from: {article.get('title', 'Unknown')[:50]}...")
+            
+            # Extract full content
+            content_data = self.extract_full_article_content(url)
+            
+            if content_data.get('extraction_success'):
+                # Merge original article with extracted content
+                enriched_article = {**article}
+                enriched_article.update(content_data)
+                enriched_articles.append(enriched_article)
+                logger.info(f"✅ Extracted {content_data.get('word_count', 0)} words")
+            else:
+                logger.warning(f"❌ Failed to extract content from: {article.get('title', 'Unknown')[:50]}")
+                # Still include article with original data
+                enriched_articles.append(article)
+        
+        return enriched_articles
+
     def _make_gpt_request(self, prompt: str, max_tokens: int = 300, temperature: float = 0.3) -> str:
         """Make GPT request with proper error handling and truncation detection"""
         try:
@@ -193,9 +308,14 @@ class IntelligentSummarizeAgent:
                     })
                 
                 prompt = f"""
-                Analyze these GitHub commits for {cluster_info['display_name']}:
+                Analyze these GitHub commits for {cluster_info['display_name']} on {datetime.now().strftime("%B %d, %Y")}:
                 
                 Commits: {json.dumps(commit_details, indent=2)}
+                
+                CRITICAL CONTEXT:
+                - Today's date is {datetime.now().strftime("%B %d, %Y")}
+                - You are analyzing recent development activity in AI and robotics
+                - Focus on what developers are actually working on NOW
                 
                 Provide a technical analysis focusing on:
                 1. What specific functionality is being developed/improved
@@ -274,9 +394,14 @@ class IntelligentSummarizeAgent:
                     })
                 
                 prompt = f"""
-                Analyze these research papers for {cluster_info['display_name']}:
+                Analyze these research papers for {cluster_info['display_name']} on {datetime.now().strftime("%B %d, %Y")}:
                 
                 Papers: {json.dumps(paper_data, indent=2)}
+                
+                CRITICAL CONTEXT:
+                - Today's date is {datetime.now().strftime("%B %d, %Y")}
+                - You are analyzing recent research developments in AI and robotics
+                - Focus on what researchers are working on NOW in {datetime.now().year}
                 
                 Provide an insightful analysis focusing on:
                 1. What research problems are being addressed
@@ -312,77 +437,100 @@ class IntelligentSummarizeAgent:
             return {'status': 'error', 'message': 'Paper analysis unavailable due to processing error.'}
     
     def analyze_news_clusters(self, articles: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Analyze news with clustering and topic grouping"""
+        """Analyze news articles with full content extraction and context-aware analysis"""
         try:
             if not articles:
-                return {'status': 'no_data', 'message': 'No AI/robotics news found in monitoring period.'}
+                return {'status': 'no_data', 'message': 'No news articles found in monitoring period.'}
             
-            # Cluster news by topic
-            clustered_news = self.cluster_items_by_topic(
+            # Cluster articles by topic
+            clustered_articles = self.cluster_items_by_topic(
                 articles,
-                ['title', 'description', 'keyword', 'source']
+                ['title', 'description', 'content']
             )
             
-            if not clustered_news:
-                return {'status': 'no_clusters', 'message': 'No significant news clusters identified.'}
+            if not clustered_articles:
+                return {'status': 'no_clusters', 'message': 'No clusterable news found.'}
             
             analysis_results = {}
+            current_date = datetime.now().strftime("%B %d, %Y")
             
-            for cluster_id, cluster_articles in clustered_news.items():
+            for cluster_id, cluster_articles in clustered_articles.items():
+                if len(cluster_articles) < 1:
+                    continue
+                    
                 cluster_info = self.topic_clusters.get(cluster_id, {
-                    'display_name': '📡 Industry Updates',
-                    'icon': '📡'
+                    'display_name': '📰 Tech News',
+                    'icon': '📰'
                 })
                 
-                # Take top articles from cluster
-                top_articles = sorted(cluster_articles, key=lambda x: x.get('relevance_score', 0), reverse=True)[:3]
+                logger.info(f"Analyzing {len(cluster_articles)} articles for {cluster_info['display_name']}")
                 
-                articles_data = []
-                for article in top_articles:
-                    # Extract content tags
-                    full_text = f"{article.get('title', '')} {article.get('description', '')}"
-                    tags = self.extract_content_tags(full_text)
+                # Extract full content from top articles
+                enriched_articles = self.enrich_articles_with_content(cluster_articles, max_articles=3)
+                
+                if not enriched_articles:
+                    logger.warning(f"No articles available for cluster: {cluster_info['display_name']}")
+                    continue
+                
+                # Create detailed analysis prompt with full content
+                article_content = []
+                for i, article in enumerate(enriched_articles, 1):
+                    content = article.get('content', '')
+                    if len(content) > 2000:
+                        content = content[:2000] + '...'
+                    elif len(content) < 100:
+                        # Use description if content extraction failed
+                        content = article.get('description', 'Content not available')
                     
-                    article_info = {
-                        'title': article.get('title', ''),
-                        'source': article.get('source', ''),
-                        'description': article.get('description', '')[:200],
-                        'relevance_score': article.get('relevance_score', 0),
-                        'tags': tags
-                    }
-                    articles_data.append(article_info)
+                    article_content.append(f"""
+Article {i}: {article.get('title', 'Unknown')}
+Source: {article.get('source', 'Unknown')} | Published: {article.get('published_at', 'Recent')}
+Content: {content}
+URL: {article.get('url', '')}
+""")
                 
                 prompt = f"""
-                Analyze these news articles for {cluster_info['display_name']}:
+You are analyzing AI and robotics news on {current_date}. 
+
+Topic: {cluster_info['display_name']}
+
+Here are the full articles with actual content:
+
+{''.join(article_content)}
+
+CRITICAL CONTEXT:
+- Today's date is {current_date} (NOT 2023!)
+- You are analyzing recent developments in AI and robotics
+- Base your analysis ONLY on the actual article content provided above
+- Be specific about companies, products, technical details, and dates mentioned in the articles
+
+Provide analysis focusing on:
+1. What specific business developments or technical advances are happening
+2. Key product launches, partnerships, or strategic announcements
+3. Concrete details from the articles (names, numbers, dates, capabilities)
+
+Format: Write 2-3 sentences describing what's actually happening based on the article content, then list exactly 2-3 key developments as bullets:
+- Each bullet: *Company/Product* — Specific development from the articles with concrete details (1 line max)
+- Include specific metrics, dates, or technical capabilities mentioned in the articles
+- Focus on what's NEW or ANNOUNCED, not general background
+
+Example format:
+"Microsoft has integrated advanced AI capabilities into its developer tools, while NVIDIA announced new partnerships for autonomous vehicle development. These moves represent concrete steps toward enterprise AI adoption in {current_date.split(',')[1].strip()}.
+- *Microsoft Copilot* — Launched new code generation features with 40% faster debugging capabilities for Visual Studio users
+- *NVIDIA Drive* — Announced partnership with Mercedes-Benz to deploy AI-powered autonomous driving systems in 2025 models
+- *OpenAI Enterprise* — Released API updates enabling real-time voice interactions for business applications"
+
+Base everything on the actual article content provided. Do not make up details not in the articles.
+"""
                 
-                Articles: {json.dumps(articles_data, indent=2)}
-                
-                Provide industry analysis focusing on:
-                1. What business developments or strategic moves are happening
-                2. Key product launches, partnerships, or announcements
-                3. Market implications or competitive dynamics
-                
-                Format: Write 2-3 sentences describing the industry developments, then list exactly 2-3 key announcements as bullets:
-                - Each bullet: *Company/Product* — Specific announcement or development (1 line max)
-                - Focus on concrete business actions, not speculation
-                - Highlight what's new or significant about each announcement
-                
-                Example good format:
-                "The AI industry continues to evolve with significant developments from major players like Microsoft and NVIDIA. Companies are focusing on enterprise AI tools and autonomous vehicle technologies.
-                - *Microsoft AI* — Introduced Code Researcher, a deep research agent for large systems code and commit history
-                - *NVIDIA* — CEO outlined the blueprint for Europe's AI boom at GTC Paris
-                - *NVIDIA* — Released new AI models and developer tools to advance the autonomous vehicle ecosystem"
-                
-                Do not use markdown headers. Be specific about what each company announced.
-                """
-                
-                analysis = self._make_gpt_request(prompt, max_tokens=250, temperature=0.3)
+                analysis = self._make_gpt_request(prompt, max_tokens=400, temperature=0.2)
                 
                 analysis_results[cluster_id] = {
                     'cluster_info': cluster_info,
                     'article_count': len(cluster_articles),
                     'analysis': analysis,
-                    'raw_articles': top_articles
+                    'raw_articles': enriched_articles[:2],  # Keep top 2 with full content
+                    'content_extracted': True
                 }
             
             return {'status': 'success', 'clusters': analysis_results}
@@ -450,31 +598,40 @@ class IntelligentSummarizeAgent:
             
             # Generate GPT-powered strategic analysis
             prompt = f"""
-            Analyze this AI intelligence data to identify the most important strategic patterns:
+            You are analyzing AI intelligence data on {datetime.now().strftime("%B %d, %Y")} (NOT 2023!).
+
+            Analyze this data to identify strategic patterns:
 
             {json.dumps(strategic_data, indent=2)}
 
-            Write exactly 3-4 sentences that reveal non-obvious strategic insights by connecting developments across different sectors.
+            CRITICAL CONTEXT:
+            - Today's date is {datetime.now().strftime("%B %d, %Y")}
+            - You are analyzing current developments in AI and robotics
+            - Focus on what's happening NOW in {datetime.now().year}
+            - Provide actionable intelligence for current business decisions
+
+            Write exactly 3-4 sentences revealing strategic insights by connecting developments across sectors.
 
             Focus on:
-            - Cross-sector implications (e.g., "NVIDIA's X + OpenAI's Y = Z trend")
-            - Timing signals for technology adoption
-            - Competitive positioning shifts
-            - Regulatory/geopolitical implications
+            - Cross-sector implications connecting different companies/technologies
+            - Current timing signals for technology adoption in {datetime.now().year}
+            - Competitive positioning shifts happening now
+            - Immediate business implications for {datetime.now().year}
 
             Requirements:
             - Maximum 4 sentences total
             - Each insight must connect at least 2 different sectors/companies
-            - Include specific implications for different stakeholder types
-            - End with actionable intelligence
+            - Include specific implications for business stakeholders
+            - End with actionable intelligence for {datetime.now().year}
+            - Do NOT reference 2023 or any past years
 
             Example format:
-            "The convergence of NVIDIA's European expansion and OpenAI's data privacy stance suggests a coordinated shift toward regional AI sovereignty. Technical teams should evaluate EU-based AI infrastructure options while legal teams prepare for stricter data localization requirements. The simultaneous focus on humanoid robotics safety regulations indicates physical AI deployment timelines are accelerating, requiring immediate workforce transition planning."
+            "The convergence of NVIDIA's enterprise AI expansion and OpenAI's multimodal capabilities signals accelerated enterprise AI adoption in Q1 {datetime.now().year}. Technical teams should evaluate integrated AI infrastructure solutions while legal teams prepare for updated AI governance frameworks. The simultaneous focus on autonomous systems safety indicates physical AI deployment timelines are advancing faster than expected, requiring immediate workforce transition planning for {datetime.now().year}."
 
-            Write 3-4 complete sentences. No bullet points or markdown.
+            Write 3-4 complete sentences about current {datetime.now().year} developments. No bullet points.
             """
             
-            strategic_insights = self._make_gpt_request(prompt, max_tokens=200, temperature=0.3)
+            strategic_insights = self._make_gpt_request(prompt, max_tokens=250, temperature=0.3)
             
             # Ensure complete sentences
             if strategic_insights and not strategic_insights.endswith('.'):
