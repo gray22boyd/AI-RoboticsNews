@@ -79,11 +79,42 @@ def collect_papers_data():
         return []
 
 def collect_news_data():
-    """Collect news data from free RSS sources (no paywalls)"""
+    """Collect news data from free RSS sources (no paywalls) with focus on recent content"""
     try:
         from rss_news_monitor import RSSNewsMonitor
         news_monitor = RSSNewsMonitor()
-        return news_monitor.monitor_all_feeds()
+        
+        logger.info("🔍 Collecting latest AI & robotics news...")
+        news_data = news_monitor.monitor_all_feeds()
+        
+        # Filter for very recent articles (last 3 days)
+        from datetime import datetime, timedelta
+        cutoff_date = datetime.now() - timedelta(days=3)
+        
+        recent_news = []
+        for article in news_data:
+            try:
+                pub_date_str = article.get('published_at', '')
+                if pub_date_str:
+                    # Try to parse the date
+                    for fmt in ['%Y-%m-%d %H:%M', '%Y-%m-%d', '%a, %d %b %Y %H:%M:%S']:
+                        try:
+                            pub_date = datetime.strptime(pub_date_str[:19], fmt)
+                            if pub_date >= cutoff_date:
+                                recent_news.append(article)
+                            break
+                        except ValueError:
+                            continue
+                else:
+                    # If no date, assume recent
+                    recent_news.append(article)
+            except Exception as e:
+                logger.debug(f"Date parsing error for article: {e}")
+                recent_news.append(article)  # Include if can't parse date
+        
+        logger.info(f"📰 Found {len(recent_news)} recent articles (last 3 days)")
+        return recent_news
+        
     except Exception as e:
         logger.error(f"RSS news monitoring failed: {e}")
         # Fallback to original NewsAPI if RSS fails

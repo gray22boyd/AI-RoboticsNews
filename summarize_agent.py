@@ -195,35 +195,113 @@ class IntelligentSummarizeAgent:
         return enriched_articles
 
     def _make_gpt_request(self, prompt: str, max_tokens: int = 300, temperature: float = 0.3) -> str:
-        """Make GPT request with proper error handling and truncation detection"""
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-4",
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                temperature=temperature
-            )
-            
-            content = response.choices[0].message.content.strip()
-            finish_reason = response.choices[0].finish_reason
-            
-            # Check if response was truncated
-            if finish_reason == "length":
-                logger.warning("GPT response was truncated, retrying with higher token limit")
-                # Retry with more tokens
+        """Make GPT request with proper error handling, truncation detection, and date validation"""
+        current_year = datetime.now().year
+        current_date = datetime.now().strftime("%B %d, %Y")
+        
+        # Add aggressive current date enforcement to every prompt
+        enhanced_prompt = f"""
+CRITICAL CONTEXT - READ CAREFULLY:
+- TODAY'S DATE: {current_date}
+- CURRENT YEAR: {current_year}
+- YOU MUST NOT REFERENCE ANY YEAR BEFORE {current_year}
+- DO NOT MENTION 2022, 2023, OR ANY PAST YEARS
+- ALL ANALYSIS MUST BE ABOUT CURRENT {current_year} DEVELOPMENTS
+- IF YOU REFERENCE ANY PAST YEAR, YOUR RESPONSE WILL BE REJECTED
+
+{prompt}
+
+REMINDER: Today is {current_date}. Focus ONLY on current {current_year} developments.
+"""
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
                 response = self.client.chat.completions.create(
                     model="gpt-4",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=max_tokens * 2,
+                    messages=[
+                        {"role": "system", "content": f"You are an AI analyst working on {current_date}. Never reference years before {current_year}. Focus only on current developments."},
+                        {"role": "user", "content": enhanced_prompt}
+                    ],
+                    max_tokens=max_tokens,
                     temperature=temperature
                 )
-                content = response.choices[0].message.content.strip()
                 
-            return content
-            
-        except Exception as e:
-            logger.error(f"GPT request failed: {e}")
-            return "Analysis temporarily unavailable due to processing error."
+                content = response.choices[0].message.content.strip()
+                finish_reason = response.choices[0].finish_reason
+                
+                # Validate content for outdated references
+                if self._contains_outdated_references(content, current_year):
+                    logger.warning(f"GPT response contains outdated references, retrying (attempt {attempt + 1})")
+                    if attempt < max_retries - 1:
+                        continue
+                    else:
+                        # Force current year context in final attempt
+                        content = self._fix_outdated_references(content, current_year)
+                
+                # Check if response was truncated
+                if finish_reason == "length":
+                    logger.warning("GPT response was truncated, retrying with higher token limit")
+                    # Retry with more tokens
+                    response = self.client.chat.completions.create(
+                        model="gpt-4",
+                        messages=[
+                            {"role": "system", "content": f"You are an AI analyst working on {current_date}. Never reference years before {current_year}."},
+                            {"role": "user", "content": enhanced_prompt}
+                        ],
+                        max_tokens=max_tokens * 2,
+                        temperature=temperature
+                    )
+                    content = response.choices[0].message.content.strip()
+                    
+                return content
+                
+            except Exception as e:
+                logger.error(f"GPT request failed (attempt {attempt + 1}): {e}")
+                if attempt == max_retries - 1:
+                    return f"Analysis temporarily unavailable due to processing error on {current_date}."
+        
+        return f"Analysis unavailable - please try again on {current_date}."
+
+    def _contains_outdated_references(self, content: str, current_year: int) -> bool:
+        """Check if content contains references to past years"""
+        outdated_patterns = [
+            r'\b202[0-3]\b',  # 2020, 2021, 2022, 2023
+            r'\bby the end of 202[0-3]\b',
+            r'\bin 202[0-3]\b',
+            r'\bQ[1-4] 202[0-3]\b',
+            r'\b2022\b', r'\b2023\b'  # Explicit year mentions
+        ]
+        
+        for pattern in outdated_patterns:
+            if re.search(pattern, content, re.IGNORECASE):
+                logger.warning(f"Found outdated reference: {pattern} in content")
+                return True
+        return False
+
+    def _fix_outdated_references(self, content: str, current_year: int) -> str:
+        """Fix outdated year references in content"""
+        current_date = datetime.now().strftime("%B %d, %Y")
+        
+        # Replace specific outdated patterns
+        fixes = [
+            (r'\bby the end of 202[0-3]\b', f'by the end of {current_year}'),
+            (r'\bin 202[0-3]\b', f'in {current_year}'),
+            (r'\bQ[1-4] 202[0-3]\b', f'Q1 {current_year}'),
+            (r'\b2022\b', str(current_year)),
+            (r'\b2023\b', str(current_year)),
+            (r'\b2024\b', str(current_year))
+        ]
+        
+        fixed_content = content
+        for pattern, replacement in fixes:
+            fixed_content = re.sub(pattern, replacement, fixed_content, flags=re.IGNORECASE)
+        
+        # Add current date context if missing
+        if current_year not in fixed_content:
+            fixed_content = f"Based on current {current_year} developments, {fixed_content}"
+        
+        return fixed_content
     
     def cluster_items_by_topic(self, items: List[Dict[str, Any]], text_fields: List[str]) -> Dict[str, List[Dict]]:
         """Cluster items by topic based on content analysis"""
@@ -597,41 +675,45 @@ Base everything on the actual article content provided. Do not make up details n
                     }
             
             # Generate GPT-powered strategic analysis
+            current_date = datetime.now().strftime("%B %d, %Y")
+            current_year = datetime.now().year
+            
             prompt = f"""
-            You are analyzing AI intelligence data on {datetime.now().strftime("%B %d, %Y")} (NOT 2023!).
+            URGENT: You are analyzing AI intelligence data on {current_date}.
+
+            ABSOLUTE REQUIREMENTS:
+            - TODAY IS {current_date}
+            - CURRENT YEAR IS {current_year}
+            - NEVER MENTION 2022, 2023, OR ANY PAST YEARS
+            - ALL INSIGHTS MUST BE ABOUT {current_year} DEVELOPMENTS
+            - FOCUS ON WHAT'S HAPPENING RIGHT NOW IN {current_year}
 
             Analyze this data to identify strategic patterns:
 
             {json.dumps(strategic_data, indent=2)}
 
-            CRITICAL CONTEXT:
-            - Today's date is {datetime.now().strftime("%B %d, %Y")}
-            - You are analyzing current developments in AI and robotics
-            - Focus on what's happening NOW in {datetime.now().year}
-            - Provide actionable intelligence for current business decisions
-
             Write exactly 3-4 sentences revealing strategic insights by connecting developments across sectors.
 
             Focus on:
-            - Cross-sector implications connecting different companies/technologies
-            - Current timing signals for technology adoption in {datetime.now().year}
-            - Competitive positioning shifts happening now
-            - Immediate business implications for {datetime.now().year}
+            - Cross-sector implications connecting different companies/technologies in {current_year}
+            - Current timing signals for technology adoption happening NOW in {current_year}
+            - Competitive positioning shifts occurring in {current_year}
+            - Immediate business implications for the rest of {current_year}
 
             Requirements:
             - Maximum 4 sentences total
             - Each insight must connect at least 2 different sectors/companies
-            - Include specific implications for business stakeholders
-            - End with actionable intelligence for {datetime.now().year}
-            - Do NOT reference 2023 or any past years
+            - Include specific implications for business stakeholders in {current_year}
+            - End with actionable intelligence for the remainder of {current_year}
+            - ABSOLUTELY NO REFERENCES TO YEARS BEFORE {current_year}
 
-            Example format:
-            "The convergence of NVIDIA's enterprise AI expansion and OpenAI's multimodal capabilities signals accelerated enterprise AI adoption in Q1 {datetime.now().year}. Technical teams should evaluate integrated AI infrastructure solutions while legal teams prepare for updated AI governance frameworks. The simultaneous focus on autonomous systems safety indicates physical AI deployment timelines are advancing faster than expected, requiring immediate workforce transition planning for {datetime.now().year}."
+            Example format (adapt to actual data):
+            "The convergence of NVIDIA's enterprise AI expansion and OpenAI's multimodal capabilities signals accelerated enterprise AI adoption in {current_year}. Technical teams should evaluate integrated AI infrastructure solutions while legal teams prepare for updated AI governance frameworks being developed in {current_year}. The simultaneous focus on autonomous systems safety indicates physical AI deployment timelines are advancing faster than expected, requiring immediate workforce transition planning for the remainder of {current_year}. Companies should prioritize AI integration strategies and regulatory compliance preparations before Q4 {current_year}."
 
-            Write 3-4 complete sentences about current {datetime.now().year} developments. No bullet points.
+            Write 3-4 complete sentences about current {current_year} developments only.
             """
             
-            strategic_insights = self._make_gpt_request(prompt, max_tokens=250, temperature=0.3)
+            strategic_insights = self._make_gpt_request(prompt, max_tokens=300, temperature=0.2)
             
             # Ensure complete sentences
             if strategic_insights and not strategic_insights.endswith('.'):
