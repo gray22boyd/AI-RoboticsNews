@@ -416,31 +416,47 @@ class IntelligentSummarizeAgent:
             
             # Generate GPT-powered strategic analysis
             prompt = f"""
-            Analyze this comprehensive AI and robotics intelligence data to identify strategic trends and implications:
-            
-            Data Summary: {json.dumps(strategic_data, indent=2)}
-            
-            Synthesize 2-3 sentences about the most significant strategic patterns you observe. Focus on:
-            - Cross-sector trends (development + research + industry alignment)
-            - Emerging technological shifts or priorities
-            - Implications for AI/robotics professionals and organizations
-            - Market or competitive dynamics
-            
-            Write in a professional, analytical tone. Avoid generic statements. Base insights only on the actual data provided. If no meaningful patterns emerge, state that honestly.
-            
-            Example style: "The convergence of development activity and research focus in humanoid robotics suggests accelerating commercialization timelines. Simultaneously, increased attention to AI safety across both policy discussions and technical implementations indicates growing industry maturity. These trends point to a critical inflection point where theoretical AI capabilities are rapidly transitioning to real-world deployment."
-            
-            Do not use markdown formatting, bullet points, or section headers.
+            Analyze this AI intelligence data to identify the most important strategic patterns:
+
+            {json.dumps(strategic_data, indent=2)}
+
+            Write exactly 3-4 sentences that reveal non-obvious strategic insights by connecting developments across different sectors.
+
+            Focus on:
+            - Cross-sector implications (e.g., "NVIDIA's X + OpenAI's Y = Z trend")
+            - Timing signals for technology adoption
+            - Competitive positioning shifts
+            - Regulatory/geopolitical implications
+
+            Requirements:
+            - Maximum 4 sentences total
+            - Each insight must connect at least 2 different sectors/companies
+            - Include specific implications for different stakeholder types
+            - End with actionable intelligence
+
+            Example format:
+            "The convergence of NVIDIA's European expansion and OpenAI's data privacy stance suggests a coordinated shift toward regional AI sovereignty. Technical teams should evaluate EU-based AI infrastructure options while legal teams prepare for stricter data localization requirements. The simultaneous focus on humanoid robotics safety regulations indicates physical AI deployment timelines are accelerating, requiring immediate workforce transition planning."
+
+            Write 3-4 complete sentences. No bullet points or markdown.
             """
             
             response = self.client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=200,
-                temperature=0.4
+                max_tokens=150,  # Strict limit to prevent cutoffs
+                temperature=0.3
             )
             
-            return response.choices[0].message.content.strip()
+            insights = response.choices[0].message.content.strip()
+            
+            # Ensure complete sentences
+            if insights and not insights.endswith('.'):
+                # Find the last complete sentence
+                last_period = insights.rfind('.')
+                if last_period > 0:
+                    insights = insights[:last_period + 1]
+            
+            return insights
             
         except Exception as e:
             logger.error(f"Error generating cross-cluster insights: {e}")

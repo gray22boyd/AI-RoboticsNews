@@ -180,15 +180,15 @@ def main():
     logger.info("🧠 Generating intelligent AI digest with clustering and analysis...")
     try:
         from summarize_agent import IntelligentSummarizeAgent
-        from email_agent import IntelligentEmailAgent
+        from enhanced_email_agent import EnhancedEmailAgent
         
         # Create intelligent analysis
         summarizer = IntelligentSummarizeAgent()
         digest_data = summarizer.create_intelligent_digest(github_data, papers_data, news_data)
         
-        # Generate email content
-        email_agent = IntelligentEmailAgent()
-        email_content = email_agent.create_intelligent_email_content(digest_data, github_data, papers_data, news_data)
+        # Generate enhanced email content with visual improvements
+        email_agent = EnhancedEmailAgent()
+        email_content = email_agent.create_enhanced_email_content(digest_data, github_data, papers_data, news_data)
         
         # Send email
         logger.info("📧 Sending email digest...")
