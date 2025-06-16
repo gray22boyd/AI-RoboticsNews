@@ -1,3 +1,5 @@
+%%% This Project is 97% Vibe Coded%%%%
+
 # 🤖 AI & Robotics Intelligence Digest
 
 An intelligent news monitoring system that automatically generates professional daily digests of AI and robotics developments by clustering and analyzing GitHub commits, research papers, and industry news using GPT-4.
